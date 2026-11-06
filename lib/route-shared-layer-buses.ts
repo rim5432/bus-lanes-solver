@@ -35,7 +35,58 @@ export function* routeSharedLayerBuses(
   const availableLayers = bounded
     ? new Map(native.connections.map((c) => [c.name, signalLayers(native, c)]))
     : terminalLayers
-  for (const paired of planSharedPairCorridors(allocation, availableLayers)) {
+  // Outer-carrier multi-pair shapes need a surgery on the corridor planning
+  // scene; everything else keeps the upstream scene untouched (the legacy
+  // inner-layer captures solve there and degrade under the surgery - their
+  // escape geometry is a different regime this was never measured on). For
+  // the outer two-bus composed shape the pipeline hands this phase an
+  // allocation whose connection terminals were retargeted to escape
+  // far-ends (bottom) and whose traces carry the full pad-field escape
+  // copper. Both poison the coupled-pair corridor search: planning from
+  // the retargeted terminals through the singles' escape copper is the
+  // fatal shape (~95k voids, no plans), while the same planner on native
+  // pad terminals yields real pair plans with the singles' escapes
+  // present (~12 s) - and the pairs' own escapes seal their pad exits
+  // only once the singles' escapes also occupy the surrounding channels
+  // (all 44 present: zero plans in 90 s; either subset alone: plans in
+  // 7-23 s). Plan corridors from the native pads around the singles'
+  // escapes; every downstream check (reachability, negotiation,
+  // refinement) still sees the full allocation scene with escapes and
+  // retargeted terminals.
+  const outerCarriers =
+    !!native.allowedLayers?.length &&
+    native.allowedLayers.every((layer) => layer === "top" || layer === "bottom")
+  const pairsPerPadLayer = new Map<string, number>()
+  for (const pair of allocation.differentialPairs ?? []) {
+    const layer = allocation.connections.find(
+      (c) => c.name === pair.connectionNames[0],
+    )?.pointsToConnect[0].layer
+    if (layer)
+      pairsPerPadLayer.set(layer, (pairsPerPadLayer.get(layer) ?? 0) + 1)
+  }
+  const escapeCopper = new Set(
+    escapes.filter((trace) => pairNames.has(trace.connection_name!)),
+  )
+  const nativeTerminals = new Map(
+    native.connections.map((c) => [c.name, c.pointsToConnect]),
+  )
+  const corridorInput =
+    outerCarriers && [...pairsPerPadLayer.values()].some((n) => n > 1)
+      ? {
+          ...allocation,
+          connections: allocation.connections.map((c) => ({
+            ...c,
+            pointsToConnect: nativeTerminals.get(c.name) ?? c.pointsToConnect,
+          })),
+          traces: (allocation.traces ?? []).filter(
+            (trace) => !escapeCopper.has(trace),
+          ),
+        }
+      : allocation
+  for (const paired of planSharedPairCorridors(
+    corridorInput,
+    availableLayers,
+  )) {
     yield
     if (!paired) continue
     const local = structuredClone(allocation)
