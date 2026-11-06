@@ -12,3 +12,9 @@ export {
   SingleLayerConnectivitySolver,
   type SingleLayerConnectivityOptions,
 } from "./single-layer-connectivity-solver"
+
+export {
+  routeWindowedHopFinisher,
+  type HopFinisherWindow,
+  type HopFinisherOptions,
+} from "./route-hop-finisher"
