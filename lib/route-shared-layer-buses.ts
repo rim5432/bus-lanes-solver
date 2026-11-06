@@ -35,12 +35,9 @@ export function* routeSharedLayerBuses(
   const availableLayers = bounded
     ? new Map(native.connections.map((c) => [c.name, signalLayers(native, c)]))
     : terminalLayers
-  const plans = planSharedPairCorridors(allocation, availableLayers)
-  for (const paired of plans) {
-    if (!paired) {
-      yield
-      continue
-    }
+  for (const paired of planSharedPairCorridors(allocation, availableLayers)) {
+    yield
+    if (!paired) continue
     const local = structuredClone(allocation)
     for (const c of local.connections) {
       const trace = paired.find((t) => t.connection_name === c.name)
@@ -65,7 +62,7 @@ export function* routeSharedLayerBuses(
           connection.name,
           layer,
           paired
-            .filter((t) => (t.route[0] as Wire).layer === layer)
+            .filter((t: Trace) => (t.route[0] as Wire).layer === layer)
             .map((t) => {
               if (!identities.has(t)) identities.set(t, serial++)
               return identities.get(t)
