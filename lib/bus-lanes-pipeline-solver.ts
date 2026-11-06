@@ -402,6 +402,8 @@ export class BusLanesPipelineSolver extends BaseSolver {
   }
 
   private sharedPackages?: Generator<void, RepairedBusDogbones | null>
+  /** Which route produced the shared-packages generator, for branch tests. */
+  sharedPackagesRouteName?: string
   private backwardPackages?: Generator<void, RepairedBusDogbones | null>
   private child?: BusLanesSolver
   private escapes: Trace[] = []
@@ -1036,6 +1038,38 @@ export class BusLanesPipelineSolver extends BaseSolver {
       connections: result.connections as SimpleRouteJson["connections"],
       traces: [...(this.routingInput.traces ?? []), ...this.escapes],
     }
+    const busNames = new Set(laneInput.buses?.flatMap((b) => b.connectionNames))
+    const multilayerBus = (laneInput.buses ?? []).some(
+      (bus) =>
+        new Set(
+          laneInput.connections
+            .filter((connection) =>
+              bus.connectionNames.includes(connection.name),
+            )
+            .map((connection) => connection.pointsToConnect[0].layer),
+        ).size > 1,
+    )
+    // A standalone pair sharing a bus layer disables independent bus routing.
+    // Match the buses first, then route standalone pairs before the controls.
+    const pairsPerLayer = new Map<string, number>()
+    for (const pair of laneInput.differentialPairs ?? []) {
+      const layer = laneInput.connections.find(
+        (c) => c.name === pair.connectionNames[0],
+      )!.pointsToConnect[0].layer
+      pairsPerLayer.set(layer, (pairsPerLayer.get(layer) ?? 0) + 1)
+    }
+    const deferStandalonePairs = [...pairsPerLayer.values()].some(
+      (count) => count > 1,
+    )
+    const direction = laneInput.connections
+      .filter((c) => busNames.has(c.name))
+      .reduce(
+        (sum, c) => ({
+          x: sum.x + c.pointsToConnect[1].x - c.pointsToConnect[0].x,
+          y: sum.y + c.pointsToConnect[1].y - c.pointsToConnect[0].y,
+        }),
+        { x: 0, y: 0 },
+      )
     const independentGroups = independentBusGroups(laneInput)
     const fixedEscapeSites = terminalLayers.size === 0
     const allEscapesGenerated =
@@ -1060,6 +1094,7 @@ export class BusLanesPipelineSolver extends BaseSolver {
         maxSteps: Math.floor((this.MAX_ITERATIONS - this.iterations) / 2),
         finish: (context) => this.finishIndependentCarrier(context),
       })
+      this.sharedPackagesRouteName = "fresh_independent_buses"
       return
     }
     if (
@@ -1069,6 +1104,10 @@ export class BusLanesPipelineSolver extends BaseSolver {
       ((this.routingInput.buses?.length ?? 0) > 1 ||
         this.routingInput.buses?.some((bus) => bus.maxLength !== undefined)) &&
       canRouteOnPadLayers(this.routingInput) &&
+      // Steer multi-pair single-carrier shapes to the lane-negotiated
+      // shared-layer route: same-surface site negotiation cannot resolve
+      // their crossing inversions. Multilayer cohorts keep the surface path.
+      (!deferStandalonePairs || multilayerBus) &&
       !independentBusGroups(laneInput)
     ) {
       this.sharedPackages = routeFreshSurfaceBuses(
@@ -1078,31 +1117,9 @@ export class BusLanesPipelineSolver extends BaseSolver {
         terminalLayers,
         this.childOptions(),
       )
+      this.sharedPackagesRouteName = "fresh_surface_buses"
       return
     }
-    const busNames = new Set(laneInput.buses?.flatMap((b) => b.connectionNames))
-    const multilayerBus = (laneInput.buses ?? []).some(
-      (bus) =>
-        new Set(
-          laneInput.connections
-            .filter((connection) =>
-              bus.connectionNames.includes(connection.name),
-            )
-            .map((connection) => connection.pointsToConnect[0].layer),
-        ).size > 1,
-    )
-    const pairsPerLayer = new Map<string, number>()
-    for (const pair of laneInput.differentialPairs ?? []) {
-      const layer = laneInput.connections.find(
-        (c) => c.name === pair.connectionNames[0],
-      )!.pointsToConnect[0].layer
-      pairsPerLayer.set(layer, (pairsPerLayer.get(layer) ?? 0) + 1)
-    }
-    // A standalone pair sharing a bus layer disables independent bus routing.
-    // Match the buses first, then route standalone pairs before the controls.
-    const deferStandalonePairs = [...pairsPerLayer.values()].some(
-      (count) => count > 1,
-    )
     const constrained = new Set([
       ...busNames,
       ...(laneInput.differentialPairs ?? [])
@@ -1121,15 +1138,6 @@ export class BusLanesPipelineSolver extends BaseSolver {
     )
     // The reference routes and tunes bus corridors before placing unrelated
     // controls, so those controls cannot consume space required for matching.
-    const direction = laneInput.connections
-      .filter((c) => busNames.has(c.name))
-      .reduce(
-        (sum, c) => ({
-          x: sum.x + c.pointsToConnect[1].x - c.pointsToConnect[0].x,
-          y: sum.y + c.pointsToConnect[1].y - c.pointsToConnect[0].y,
-        }),
-        { x: 0, y: 0 },
-      )
     if (
       !multilayerBus &&
       this.attempt === 0 &&
@@ -1172,6 +1180,9 @@ export class BusLanesPipelineSolver extends BaseSolver {
         terminalLayers,
         this.childOptions(),
       )
+      this.sharedPackagesRouteName = freshSites
+        ? "fresh_shared_buses"
+        : "shared_layer_buses"
       return
     }
     if (

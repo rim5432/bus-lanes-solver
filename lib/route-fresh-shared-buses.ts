@@ -81,10 +81,8 @@ export function* routeFreshSharedBuses(
       : terminalLayers,
     true,
   )) {
-    if (!paired) {
-      yield
-      continue
-    }
+    yield
+    if (!paired) continue
     // Large independently routed bus approaches impose an expensive topology
     // before matching. Prefer a more coupled bus candidate; standalone pairs
     // can still be extended after the bus corridors are matched.
