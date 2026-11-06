@@ -4,8 +4,10 @@ import { fixedCopper, VectorScene } from "./vector-scene"
 import type { Point, SimpleRouteJson } from "./types"
 
 /** Straight coupled corridors in board-world millimetres (+X right, +Y up).
- * Only axis-aligned package pairs are eligible. Points use the board frame;
- * forward/normal are unit directions. Fixed copper is never moved.
+ * Package pairs may be axis-aligned or diagonal; diagonal corridors are
+ * generated in the rotated forward/normal frame the projections already use.
+ * Points use the board frame; forward/normal are unit directions. Fixed
+ * copper is never moved.
  */
 export function nativeGroupCenterlines(
   input: SimpleRouteJson,
@@ -39,8 +41,7 @@ export function nativeGroupCenterlines(
     b = center(target.pads)
   const distance = Math.hypot(b.x - a.x, b.y - a.y)
   const forward = { x: (b.x - a.x) / distance, y: (b.y - a.y) / distance }
-  if (Math.abs(forward.x) > 1e-8 && Math.abs(forward.y) > 1e-8)
-    return [undefined]
+  const diagonal = Math.abs(forward.x) > 1e-8 && Math.abs(forward.y) > 1e-8
   const normal = { x: -forward.y, y: forward.x }
   const project = (point: Point, direction: Point) =>
     point.x * direction.x + point.y * direction.y
@@ -124,6 +125,72 @@ export function nativeGroupCenterlines(
       )
     )
       selected.push([path])
+  }
+  // Rotated package pairs get fabricated 45/90-degree backbones straight in
+  // the board frame: a dominant-axis descent between the two copper fields
+  // with one 45-degree jog absorbing the cross-axis offset. Straight
+  // frame-diagonal centerlines are not representable by the lane refinement
+  // solver and would violate fabricated-angle rules anyway, so none are
+  // emitted. Vertically-dominant pairs are generated; horizontally-dominant
+  // pairs keep the free-topology fallback.
+  if (diagonal) {
+    const dy = b.y - a.y
+    if (dy !== 0 && Math.abs(dy) >= Math.abs(b.x - a.x)) {
+      const src = source.copper
+      const dst = target.copper
+      const downward = Math.sign(dy)
+      const y0 =
+        downward < 0
+          ? Math.ceil((src.minY + 0.3 * step) / step) * step
+          : Math.floor((src.maxY - 0.3 * step) / step) * step
+      const y3 =
+        downward < 0
+          ? Math.floor((dst.maxY - 0.3 * step) / step) * step
+          : Math.ceil((dst.minY + 0.3 * step) / step) * step
+      const targetX =
+        connections.reduce((s, c) => s + c.pointsToConnect[1].x, 0) / 2
+      const sourceX =
+        connections.reduce((s, c) => s + c.pointsToConnect[0].x, 0) / 2
+      const gridFit = (v: number) => Math.round(v / step) * step
+      const x3 = Math.min(
+        Math.max(
+          gridFit(targetX),
+          Math.ceil((dst.minX + halfPitch + 0.6 * step) / step) * step,
+        ),
+        Math.floor((dst.maxX - halfPitch - 0.6 * step) / step) * step,
+      )
+      const descent = Math.abs(y0 - y3)
+      const columns: number[] = []
+      for (
+        let x = Math.ceil((src.minX + halfPitch + 0.6 * step) / step) * step;
+        x <= src.maxX - halfPitch - 0.6 * step;
+        x += step
+      )
+        columns.push(Number(x.toFixed(6)))
+      columns.sort((c1, c2) => Math.abs(c1 - sourceX) - Math.abs(c2 - sourceX))
+      for (const x0 of columns.slice(0, 12)) {
+        const jogX = Math.abs(x3 - x0)
+        if (jogX > descent - 2 * step) continue
+        const splits = [
+          Math.floor((descent - jogX) / 2 / step) * step,
+          step,
+          descent - jogX - step,
+        ].filter(
+          (v, i, arr) =>
+            v >= step && arr.findIndex((o) => Math.abs(o - v) < 1e-9) === i,
+        )
+        for (const v1 of splits) {
+          const ym = y0 + downward * v1
+          add([
+            { x: x0, y: y0 },
+            { x: x0, y: ym },
+            { x: x3, y: ym + downward * jogX },
+            { x: x3, y: y3 },
+          ])
+        }
+      }
+    }
+    return selected.length ? selected : [undefined]
   }
   const stem = 8 * width
   for (const u of candidates.filter((_, i) => i % 4 === 0).slice(0, 12)) {
