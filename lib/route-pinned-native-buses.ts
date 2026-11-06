@@ -12,7 +12,7 @@ import { exteriorPairSpacingReports } from "./exterior-pair-spacing"
 import { joinedSignalGeometryIsValid } from "./joined-signal-geometry"
 import { generatedTraceTerminalViasAreClear } from "./terminal-via-clearance"
 import { effectiveCarrierLayers } from "./effective-carrier-layers"
-import { routeAlternateSignalDogbones } from "./alternate-signal-dogbones"
+import { initialSignalDogbones } from "./initial-signal-dogbones"
 import { planNativePairedCarriers } from "./plan-native-paired-carriers"
 import {
   matchNativeCarrierSignals,
@@ -122,11 +122,19 @@ export function* routePinnedNativeBuses(
   // Reserve every local escape before any carrier work, retrying the
   // alternative assignment orientations like the grouped native path: a
   // fixed-copper neighborhood can block one orientation's collective site
-  // assignment while another admits it.
+  // assignment while another admits it. The bare collective matcher is also
+  // weaker than the pipeline's own escape phase: on the AM3352 real-tree
+  // cohort at the ruled 0.1 trace-to-pad clearance the strict matcher throws
+  // in all four turns while initialSignalDogbones (the same wrapper the
+  // escape phase uses - per-connection retries plus native-pad fallback)
+  // still assigns. Its fallback needs the native pad layer, so a bus pinned
+  // to a single carrier layer keeps that rung closed; measured there the
+  // joint assignment itself is infeasible on dense fields and the cohort
+  // router must place those escapes at match time instead.
   let reservations: Trace[] | undefined
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      reservations = routeAlternateSignalDogbones(
+      reservations = initialSignalDogbones(
         input,
         {
           targetLayers: targets,
