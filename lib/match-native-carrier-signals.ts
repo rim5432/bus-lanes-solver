@@ -40,6 +40,13 @@ export interface NativeCarrierMatchingOptions {
   maxTuningCandidates?: number
   /** Bound speculative hard-only repairs; soft negotiation retains its full budget. */
   maxStrictExpansionsPerRoute?: number
+  /** Repair-round budget for the post-negotiate conflict closure loop. */
+  maxRepairRounds?: number
+  /** Return the best negotiated state instead of null when the repair
+   * rounds exhaust with residual conflicts. Callers that re-negotiate the
+   * seed under windows and validate everything at acceptance can afford
+   * the imperfect intermediate. */
+  seedFromBestClearState?: boolean
   /** Route declared differential pairs as ordinary windowed cohort members
    * instead of planning coupled backbones. The pair length, spacing and
    * coupling reports still validate them at acceptance, so a layout the
@@ -577,7 +584,7 @@ export function* matchNativeCarrierSignals(
   let state: State = firstState
   if (!state.collisions && !state.unfinished.length && valid(state.traces))
     return [...paired, ...state.traces]
-  for (let repair = 0; repair < 6; repair++) {
+  for (let repair = 0; repair < (options.maxRepairRounds ?? 6); repair++) {
     const closure = new Set<string>(),
       hits = graph(state.traces)
     for (const [a, b] of hits) {
