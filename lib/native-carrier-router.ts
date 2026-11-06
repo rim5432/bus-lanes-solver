@@ -133,7 +133,8 @@ export class NativeCarrierRouter {
       bounds = this.routingBounds,
       step = this.step,
       N = this.cellCount
-    const width = input.minTraceWidth,
+    const width =
+      c.width ?? c.nominalTraceWidth ?? input.minTraceWidth,
       diameter = input.minViaPadDiameter ?? 0.3
     // A same-net pad is transparent to copper clearance, but not to a drill.
     // Keep its physical hole out of SMT pads unless fabrication permits it.
@@ -181,7 +182,15 @@ export class NativeCarrierRouter {
       this.grid(c, layer, diameter, soft),
     )
     const g = grids[0],
-      goalStage = c.pointsToConnect[1].layer === this.carrier ? 1 : 2
+      goalStage =
+        c.pointsToConnect[1].layer === this.carrier
+          ? // A carrier that coincides with the surface-pad layer routes as a
+            // single stage-0 search: no escape confinement, no via transition.
+            // Stage 1 stays reserved for a real interlayer carrier handoff.
+            this.carrier === "top"
+            ? 0
+            : 1
+          : 2
     const ends = new Map(
       (goalStage === 1 ? grids[1] : g).ends.map((a) => [
         a.id,
@@ -190,7 +199,9 @@ export class NativeCarrierRouter {
     )
     const sourceBox = this.packageRegion(c, 0),
       targetBox =
-        goalStage === 1 ? options.carrierRegion! : this.packageRegion(c, 1)
+        goalStage === 1
+          ? (options.carrierRegion ?? this.packageRegion(c, 1))
+          : this.packageRegion(c, 1)
     const within = (p: Point, r: Bounds) =>
       p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY
     const target = c.pointsToConnect[1],
@@ -260,7 +271,11 @@ export class NativeCarrierRouter {
             b.y > bounds.maxY - wireMargin
           )
             continue
-          if (stage !== 1 && !within(b, stage === 0 ? sourceBox : targetBox))
+          if (
+            goalStage !== 0 &&
+            stage !== 1 &&
+            !within(b, stage === 0 ? sourceBox : targetBox)
+          )
             continue
           if (goalStage === 1 && stage === 1 && !within(b, targetBox)) continue
           const ni = stage * N + next,

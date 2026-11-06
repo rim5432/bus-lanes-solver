@@ -14,10 +14,63 @@ export function cleanNativeCarrierSignal(
   soft: Trace[],
   carrierToo: boolean,
 ): Trace | null {
-  const [a, b] = trace.route.flatMap((p, i) =>
+  const viaIndices = trace.route.flatMap((p, i) =>
     p.route_type === "via" ? [i] : [],
   )
-  if (a === undefined || b === undefined) return null
+  if (viaIndices.length !== 2) {
+    // A same-surface route has no via-separated carrier leg; clean its one
+    // planar run directly instead of demanding the interlayer shape.
+    if (viaIndices.length) return null
+    const route = trace.route
+    if (route.length < 2) return null
+    const c = {
+      ...connection,
+      pointsToConnect: [
+        { ...connection.pointsToConnect[0], ...route[0], layer: "top" },
+        { ...connection.pointsToConnect[1], ...route.at(-1)!, layer: "top" },
+      ],
+    }
+    const input = {
+      ...native,
+      connections: [c],
+      buses: [],
+      differentialPairs: [],
+    }
+    const hard = fixedCopper(input),
+      softCopper = fixedCopper({ ...input, obstacles: [], traces: soft })
+    const width =
+      connection.width ?? connection.nominalTraceWidth ?? native.minTraceWidth
+    try {
+      const path = reduceOrdinaryTurns(
+        route,
+        new VectorScene(input, c, width, [...hard, ...softCopper]),
+      )
+      return {
+        ...trace,
+        route: chamferOrdinaryCorners(
+          input,
+          [
+            {
+              ...trace,
+              route: path.map((p) => ({
+                ...p,
+                route_type: "wire" as const,
+                layer: "top",
+                width,
+              })),
+              curvedSegments: undefined,
+            },
+          ],
+          hard,
+          0.125,
+        )[0].route,
+        curvedSegments: undefined,
+      }
+    } catch {
+      return null
+    }
+  }
+  const [a, b] = viaIndices
   const runs = [
     trace.route.slice(0, a),
     trace.route.slice(a + 1, b),
@@ -42,9 +95,11 @@ export function cleanNativeCarrierSignal(
     }
     const hard = fixedCopper(input),
       softCopper = fixedCopper({ ...input, obstacles: [], traces: soft })
+    const width =
+      connection.width ?? connection.nominalTraceWidth ?? native.minTraceWidth
     const path = reduceOrdinaryTurns(
       route,
-      new VectorScene(input, c, native.minTraceWidth, [...hard, ...softCopper]),
+      new VectorScene(input, c, width, [...hard, ...softCopper]),
     )
     try {
       runs[side] = chamferOrdinaryCorners(
@@ -56,7 +111,7 @@ export function cleanNativeCarrierSignal(
               ...p,
               route_type: "wire" as const,
               layer,
-              width: native.minTraceWidth,
+              width,
             })),
             curvedSegments: undefined,
           },
@@ -145,11 +200,13 @@ export function tuneNativeCarrierSignal(
   // A grown timing window can need only a small second bank. Preserve the
   // existing sampled curves; shortening them as ordinary raster corners loses
   // their shape and prevents a previously feasible lane from being repaired.
+  const width =
+    connection.width ?? connection.nominalTraceWidth ?? native.minTraceWidth
   const path = preserveExistingBanks
     ? route
     : reduceOrdinaryTurns(
         route,
-        new VectorScene(input, c, native.minTraceWidth, [
+        new VectorScene(input, c, width, [
           ...hard,
           ...softCopper,
         ]),
@@ -169,7 +226,7 @@ export function tuneNativeCarrierSignal(
             ...p,
             route_type: "wire" as const,
             layer: carrier,
-            width: native.minTraceWidth,
+            width,
           })),
         },
       ],

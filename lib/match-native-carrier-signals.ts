@@ -40,6 +40,11 @@ export interface NativeCarrierMatchingOptions {
   maxTuningCandidates?: number
   /** Bound speculative hard-only repairs; soft negotiation retains its full budget. */
   maxStrictExpansionsPerRoute?: number
+  /** Route declared differential pairs as ordinary windowed cohort members
+   * instead of planning coupled backbones. The pair length, spacing and
+   * coupling reports still validate them at acceptance, so a layout the
+   * cohort router cannot keep coupled fails honestly. */
+  routePairsAsLanes?: boolean
 }
 export interface NativeCarrierProgress {
   groupName?: string

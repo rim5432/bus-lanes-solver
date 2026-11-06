@@ -23,8 +23,9 @@ import { packageApproachRegions, pointInBox } from "./package-approach-regions"
 import type { NativeSingleCarrierOptions } from "./route-matched-native-single-carrier"
 import type { SimpleRouteJson, Trace } from "./types"
 
-/** Fresh, disjoint timing groups pinned to individual inner carriers. Different
- * groups may share a carrier or connect different axis-aligned package pairs.
+/** Fresh, disjoint timing groups pinned to individual carriers (inner or
+ * outer copper layers). Different groups may share a carrier or connect
+ * package pairs in any relative orientation, axis-aligned or diagonal.
  * Existing fanouts and overlapping timing groups retain their original path. */
 export function pinnedNativeBusesEligible(input: SimpleRouteJson) {
   if (
@@ -48,7 +49,7 @@ export function pinnedNativeBusesEligible(input: SimpleRouteJson) {
         c.pointsToConnect.some(
           (p) => p.layer !== "top" || !isUnroutedComponentPad(input, c, p),
         ) ||
-        (c.width ?? c.nominalTraceWidth ?? input.minTraceWidth) !==
+        (c.width ?? c.nominalTraceWidth ?? input.minTraceWidth) <
           input.minTraceWidth,
     )
   )
@@ -61,13 +62,13 @@ export function pinnedNativeBusesEligible(input: SimpleRouteJson) {
       )
       if (
         !members.length ||
-        (bus.traceWidth !== undefined && bus.traceWidth !== input.minTraceWidth)
+        (bus.traceWidth !== undefined && bus.traceWidth < input.minTraceWidth)
       )
         return false
       const layer = effectiveCarrierLayers(input, members[0])
       if (
         layer.length !== 1 ||
-        !/^inner\d+$/.test(layer[0]) ||
+        !getCopperLayerNames(input.layerCount).includes(layer[0]) ||
         members.some(
           (c) => effectiveCarrierLayers(input, c).join() !== layer.join(),
         )
@@ -94,10 +95,6 @@ export function pinnedNativeBusesEligible(input: SimpleRouteJson) {
         !!a &&
         !!b &&
         a !== b &&
-        (Math.abs(a.pads.minX + a.pads.maxX - b.pads.minX - b.pads.maxX) <
-          1e-8 ||
-          Math.abs(a.pads.minY + a.pads.maxY - b.pads.minY - b.pads.maxY) <
-            1e-8) &&
         members.every(
           (c) =>
             pointInBox(c.pointsToConnect[0], a.pads) &&
@@ -122,24 +119,43 @@ export function* routePinnedNativeBuses(
   const targets = new Map(
     input.connections.map((c) => [c.name, effectiveCarrierLayers(input, c)[0]]),
   )
-  const fanout = routeAlternateSignalDogbones(
-    input,
-    {
-      targetLayers: targets,
-      viaDiameter: input.minViaPadDiameter ?? 0.3,
-      viaHoleDiameter: input.minViaHoleDiameter ?? 0.15,
-      traceWidth: input.minTraceWidth,
-      clearance:
-        input.minTraceToPadEdgeClearance ??
-        input.defaultObstacleMargin ??
-        0.075,
-      holeToHoleClearance: input.minViaHoleEdgeToViaHoleEdgeClearance,
-      boardEdgeClearance: input.minBoardEdgeClearance,
-      allowBlindAndBuriedVias: false,
-    },
-    0,
-  )
-  const reservations = fanout.traces as Trace[]
+  // Reserve every local escape before any carrier work, retrying the
+  // alternative assignment orientations like the grouped native path: a
+  // fixed-copper neighborhood can block one orientation's collective site
+  // assignment while another admits it.
+  let reservations: Trace[] | undefined
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      reservations = routeAlternateSignalDogbones(
+        input,
+        {
+          targetLayers: targets,
+          viaDiameter: input.minViaPadDiameter ?? 0.3,
+          viaHoleDiameter: input.minViaHoleDiameter ?? 0.15,
+          traceWidth: input.minTraceWidth,
+          clearance:
+            input.minTraceToPadEdgeClearance ??
+            input.defaultObstacleMargin ??
+            0.075,
+          holeToHoleClearance: input.minViaHoleEdgeToViaHoleEdgeClearance,
+          boardEdgeClearance: input.minBoardEdgeClearance,
+          allowBlindAndBuriedVias: false,
+        },
+        attempt,
+      ).traces as Trace[]
+      break
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !/No collision-free local dogbone assignment|Local dogbones collide/.test(
+          error.message,
+        )
+      )
+        throw error
+    }
+    yield
+  }
+  if (!reservations) return null
   const completed: Trace[] = []
   const packageRegions = packageApproachRegions(
     input,
@@ -223,7 +239,9 @@ export function* routePinnedNativeBuses(
   })
   // Every coupled backbone is reserved before ordinary lanes can close a later
   // package exit. A per-bus timing bank must not strand another bus's strobe.
-  for (const group of groups.filter((g) => g.pairs.length)) {
+  for (const group of groups.filter(
+    (g) => g.pairs.length && !options.routePairsAsLanes,
+  )) {
     const pairNames = new Set(group.pairs.flatMap((p) => p.connectionNames))
     const local = localFor(group, fixedExcept(pairNames))
     const centers = nativeGroupCenterlines(local, packageRegions)
@@ -238,10 +256,17 @@ export function* routePinnedNativeBuses(
         groupName: group.bus.name ?? group.bus.busId,
         completedConnections: completed.length,
       })
-      paired = yield* planNativePairedCarriers(local, {
-        ...group.config,
-        centerlines,
-      })
+      // A geometrically impossible centerline (handoff outside a package
+      // copper field, reversed offset) fails only its own attempt; the next
+      // corridor alternative still gets its try.
+      try {
+        paired = yield* planNativePairedCarriers(local, {
+          ...group.config,
+          centerlines,
+        })
+      } catch {
+        paired = null
+      }
       if (
         paired?.some((trace) => !joinedSignalGeometryIsValid({ input, trace }))
       )
