@@ -191,6 +191,13 @@ export class NativeCarrierRouter {
             ? 0
             : 1
           : 2
+    // Both endpoints already on the carrier (escape vias pre-placed by a
+    // reservation, e.g. the AM3352 ADDR lane sweep between reserved dogbone
+    // landings): the walk starts ON the carrier - seeding stage 0 would force
+    // a second via inside the escape pocket, and the goalStage-1 target-box
+    // confinement models a short pocket hop, not a full carrier walk.
+    const seededOnCarrier =
+      goalStage === 1 && c.pointsToConnect[0].layer === this.carrier
     const ends = new Map(
       (goalStage === 1 ? grids[1] : g).ends.map((a) => [
         a.id,
@@ -217,15 +224,18 @@ export class NativeCarrierRouter {
       remaining(id) / step + (goalStage - Math.floor(id / N)) * 100
     const frontier = this.frontier
     frontier.clear()
-    for (const a of g.starts)
+    const starts = seededOnCarrier ? grids[1].starts : g.starts
+    for (const a of starts) {
+      const id = seededOnCarrier ? N + a.id : a.id
       frontier.add(
-        a.id,
+        id,
         length(a.path) / step,
         Number.isFinite(cap) ? length(a.path) : 0,
-        heuristic(a.id),
+        heuristic(id),
         undefined,
         a.path,
       )
+    }
     let goal: LengthSearchLabel | undefined,
       expanded = 0
     try {
@@ -277,7 +287,13 @@ export class NativeCarrierRouter {
             !within(b, stage === 0 ? sourceBox : targetBox)
           )
             continue
-          if (goalStage === 1 && stage === 1 && !within(b, targetBox)) continue
+          if (
+            goalStage === 1 &&
+            !seededOnCarrier &&
+            stage === 1 &&
+            !within(b, targetBox)
+          )
+            continue
           const ni = stage * N + next,
             travelled = Number.isFinite(cap)
               ? label.travelled + n.cost * step
@@ -345,7 +361,7 @@ export class NativeCarrierRouter {
       const route: Trace["route"] = goal.rootPath!.map((p) => ({
         ...p,
         route_type: "wire",
-        layer: "top",
+        layer: seededOnCarrier ? this.carrier : "top",
         width,
       }))
       for (let i = 1; i < ids.length; i++) {

@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs"
 import {
   getCopperLayerNames,
   validateOriginalEndpointConnectivity,
@@ -12,6 +13,7 @@ import { exteriorPairSpacingReports } from "./exterior-pair-spacing"
 import { joinedSignalGeometryIsValid } from "./joined-signal-geometry"
 import { generatedTraceTerminalViasAreClear } from "./terminal-via-clearance"
 import { effectiveCarrierLayers } from "./effective-carrier-layers"
+import { routeAlternateSignalDogbones } from "./alternate-signal-dogbones"
 import { initialSignalDogbones } from "./initial-signal-dogbones"
 import { planNativePairedCarriers } from "./plan-native-paired-carriers"
 import {
@@ -128,30 +130,32 @@ export function* routePinnedNativeBuses(
   // in all four turns while initialSignalDogbones (the same wrapper the
   // escape phase uses - per-connection retries plus native-pad fallback)
   // still assigns. Its fallback needs the native pad layer, so a bus pinned
-  // to a single carrier layer keeps that rung closed; measured there the
-  // joint assignment itself is infeasible on dense fields and the cohort
-  // router must place those escapes at match time instead.
-  let reservations: Trace[] | undefined
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // to a single carrier layer keeps that rung closed. Third rung: when the
+  // wrapper still cannot place the whole cohort, connections with no legal
+  // local site at any orientation (the wrapper's own per-connection probe)
+  // ride reservation-less and the rest retry the ladder jointly. A rider
+  // loses no route: reservations only protect escape sites across groups,
+  // while every matched route - a rider's included - is authored by the
+  // cohort router itself, whose via placement writes escapes straight from
+  // pad pockets the interstitial matcher cannot see. Measured on that
+  // cohort: two nets hold zero interstitial sites at 0.1 clearance while
+  // their pad pockets still carry hundreds of all-layer via-legal cells,
+  // and the remaining nets assign jointly in 0.1 s.
+  const dogboneOptions = {
+    targetLayers: targets,
+    viaDiameter: input.minViaPadDiameter ?? 0.3,
+    viaHoleDiameter: input.minViaHoleDiameter ?? 0.15,
+    traceWidth: input.minTraceWidth,
+    clearance:
+      input.minTraceToPadEdgeClearance ?? input.defaultObstacleMargin ?? 0.075,
+    holeToHoleClearance: input.minViaHoleEdgeToViaHoleEdgeClearance,
+    boardEdgeClearance: input.minBoardEdgeClearance,
+    allowBlindAndBuriedVias: false,
+  }
+  const assignable = (scoped: SimpleRouteJson, attempt: number) => {
     try {
-      reservations = initialSignalDogbones(
-        input,
-        {
-          targetLayers: targets,
-          viaDiameter: input.minViaPadDiameter ?? 0.3,
-          viaHoleDiameter: input.minViaHoleDiameter ?? 0.15,
-          traceWidth: input.minTraceWidth,
-          clearance:
-            input.minTraceToPadEdgeClearance ??
-            input.defaultObstacleMargin ??
-            0.075,
-          holeToHoleClearance: input.minViaHoleEdgeToViaHoleEdgeClearance,
-          boardEdgeClearance: input.minBoardEdgeClearance,
-          allowBlindAndBuriedVias: false,
-        },
-        attempt,
-      ).traces as Trace[]
-      break
+      return initialSignalDogbones(scoped, dogboneOptions, attempt)
+        .traces as Trace[]
     } catch (error) {
       if (
         !(error instanceof Error) ||
@@ -160,8 +164,48 @@ export function* routePinnedNativeBuses(
         )
       )
         throw error
+      return undefined
     }
+  }
+  let reservations: Trace[] | undefined
+  for (let attempt = 0; attempt < 4; attempt++) {
+    reservations = assignable(input, attempt)
+    if (reservations) break
     yield
+  }
+  if (!reservations) {
+    const hasLocalSite = (connection: (typeof input.connections)[number]) => {
+      const local = {
+        ...input,
+        connections: [connection],
+        buses: [],
+        differentialPairs: [],
+      }
+      for (let turn = 0; turn < 4; turn++) {
+        try {
+          routeAlternateSignalDogbones(local, dogboneOptions, turn)
+          return true
+        } catch {}
+      }
+      return false
+    }
+    const sited = input.connections.filter(hasLocalSite)
+    if (sited.length < input.connections.length) {
+      // A cohort with no sited member at all rides wholly reservation-less
+      // (measured on the composed AM3352 board: a two-leg tee whose pads
+      // hold zero interstitial sites under the landed escapes). Reservations
+      // protect cross-group sites; a fully riding cohort has nothing to
+      // protect interstitially, and the matcher authors every escape.
+      if (sited.length) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          reservations = assignable({ ...input, connections: sited }, attempt)
+          if (reservations) break
+          yield
+        }
+      } else {
+        reservations = []
+      }
+    }
   }
   if (!reservations) return null
   const completed: Trace[] = []
@@ -210,7 +254,14 @@ export function* routePinnedNativeBuses(
       ...options,
       routingBounds: options.routingBounds ?? routingBounds,
       gridStep: options.gridStep ?? input.minTraceWidth / 2,
-      fixedConnections: input.connections,
+      // The DRC validation resolves every fixed trace's connection_name
+      // against these connections. On a composed board the supplied copper
+      // (AM3352 byte0's landed traces, named by their source nets) is owned
+      // by connections outside this room; without them the validator flags
+      // every foreign trace "unknown-trace-connection" and rejects the
+      // cleanest geometry (measured: zero-collision topologies dying at
+      // acceptance on that code alone).
+      fixedConnections: options.fixedConnections ?? input.connections,
       balanceApproaches: options.balanceApproaches ?? false,
       insetHandoffs: true,
       protectPairedTerminalVias: true,
@@ -227,6 +278,15 @@ export function* routePinnedNativeBuses(
   const fixedExcept = (excluded: Set<string>) => {
     const done = new Set(completed.map((t) => t.connection_name))
     return [
+      // Supplied copper is immutable context for every search here, not just
+      // the reservation matcher: on a composed board (AM3352 ADDR around the
+      // landed byte0 copper) dropping input.traces from the carrier matching
+      // let all 24 lanes overlap the fixed carrier by up to 0.2 mm - 18k
+      // segment conflicts the final DRC never saw because routedSrj was
+      // also built from completed traces alone. fixedCopper treats
+      // input.traces as exact foreign-owned sausages; the reservation ladder
+      // already sees them (it runs on input directly).
+      ...(input.traces ?? []),
       ...completed.filter((t) => !excluded.has(t.connection_name!)),
       ...reservations.filter(
         (t) =>
@@ -375,12 +435,15 @@ export function* routePinnedNativeBuses(
         config,
         (state) => report({ ...state, stage: `pinned_clear_${state.stage}` }),
       )
-      if (!clear) return null
+      if (!clear) {
+        console.error("PDBG clear-null")
+        return null
+      }
       const pairedNames = new Set(paired.map((trace) => trace.connection_name))
       seed.push(
         ...clear.filter((trace) => !pairedNames.has(trace.connection_name)),
       )
-      for (const group of unanchored)
+      for (const group of unanchored) {
         busTargetLengths[group.bus.busId] = Math.max(
           group.bus.minLength ?? 0,
           Math.ceil(
@@ -393,6 +456,22 @@ export function* routePinnedNativeBuses(
             ),
           ),
         )
+        console.error(
+          `PDBG seed-lengths ${group.bus.busId} target=${busTargetLengths[group.bus.busId]} max=${group.bus.maxLength ?? "-"} ${seed
+            .filter((trace) =>
+              group.bus.connectionNames.includes(trace.connection_name!),
+            )
+            .map((trace) => `${trace.connection_name}:${Math.round(length(trace.route) * 1e6)}`)
+            .sort()
+            .join(" ")}`,
+        )
+        try {
+          writeFileSync(
+            `${process.env.TEMP ?? "/tmp"}/pinned-seed-${group.bus.busId}.json`,
+            JSON.stringify(seed),
+          )
+        } catch {}
+      }
     } else if (unanchored.length) {
       const cells =
         (Math.ceil((bounds.maxX - bounds.minX) / step) + 1) *
@@ -469,16 +548,31 @@ export function* routePinnedNativeBuses(
     )
   )
     return null
+  // The final DRC resolves every composed trace's connection_name - the
+  // supplied copper's owners arrive through fixedConnections exactly like the
+  // matcher's acceptance DRC (measured: byte0's source-net-named traces die
+  // as "unknown-trace-connection" without them, after a clean match). The
+  // endpoint validator only checks this room's own connections and tolerates
+  // extra fixed copper, so it keeps the bare input.
+  const validationInput = {
+    ...input,
+    connections: [
+      ...input.connections,
+      ...(options.fixedConnections ?? []).filter(
+        (c) => !input.connections.some((o) => o.name === c.name),
+      ),
+    ],
+  }
   if (
     !validateOriginalEndpointConnectivity({
       inputSrj: input,
-      routedSrj: { ...input, traces: completed },
+      routedSrj: { ...input, traces: [...(input.traces ?? []), ...completed] },
     } as never).valid
   )
     return null
   const drc = validateRoutedCopperDrc({
-    inputSrj: input,
-    routedSrj: { ...input, traces: completed },
+    inputSrj: validationInput,
+    routedSrj: { ...input, traces: [...(input.traces ?? []), ...completed] },
     clearance:
       input.minTraceToPadEdgeClearance ?? input.defaultObstacleMargin ?? 0.075,
     allowBlindAndBuriedVias: false,
