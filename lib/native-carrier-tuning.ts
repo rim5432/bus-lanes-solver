@@ -217,26 +217,12 @@ export function tuneNativeCarrierSignal(
   const trace = preserveExistingBanks
     ? raw
     : cleanNativeCarrierSignal(native, connection, raw, soft, false)
-  if (!trace) {
-    // PDBG instrument (2026-11-09 review): clean failure was one of the
-    // silent tune-fail returns - distinguish it from via-shape refusal.
-    console.error(
-      `PDBG tune-clean-null ${connection.name} rawVias=${raw.route.filter((p) => p.route_type === "via").length} rawLen=${length(raw.route).toFixed(3)}`,
-    )
-    return null
-  }
+  if (!trace) return null
 
   const viaIdx = trace.route.flatMap((p, i) =>
     p.route_type === "via" ? [i] : [],
   )
-  if (viaIdx.length < 2) {
-    // PDBG instrument (2026-11-09 review): 0/1-via shapes are refused before
-    // any tuning; without this line they read as a generic tune-fail.
-    console.error(
-      `PDBG tune-via-short ${connection.name} vias=${viaIdx.length} len=${length(trace.route).toFixed(3)}`,
-    )
-    return null
-  }
+  if (viaIdx.length < 2) return null
   let a = -1,
     b = -1
   if (viaIdx.length === 2) {
@@ -258,15 +244,6 @@ export function tuneNativeCarrierSignal(
   const route = trace.route.slice(a + 1, b),
     prefix = trace.route.slice(0, a + 1),
     suffix = trace.route.slice(b)
-  // PDBG range-target probe (2026-11-09 review): env-gated, prints the
-  // whole-signal window and the fixed prefix+suffix length for every tune
-  // call. The tuner's target is the whole-signal minimum and the fixed
-  // escape copper is counted by fixedRouteLength, so this line is the
-  // authoritative test of the "leg window is offset by p+s" hypothesis.
-  if (process.env.PDBG_TUNE_WINDOW)
-    console.error(
-      `PDBG tune-probe ${connection.name} win=[${minimum.toFixed(3)},${maximum.toFixed(3)}] fixedPrefixSuffix=${(length(prefix) + length(suffix)).toFixed(3)} rawWhole=${length(trace.route).toFixed(3)} leg=${length(route).toFixed(3)}`,
-    )
   const escapes: Trace[] = [
     {
       ...trace,
@@ -368,13 +345,8 @@ export function tuneNativeCarrierSignal(
       curvedSegments: matched.curvedSegments?.map((i) => i + prefix.length),
     }
     const whole = length(full.route)
-    if (whole > maximum + 1e-8 || whole < minimum - 1e-8)
-      console.error(
-        `PDBG tune-null ${connection.name} whole=${whole.toFixed(3)} win=[${minimum.toFixed(3)},${maximum.toFixed(3)}] fixedPrefixSuffix=${(length(prefix) + length(suffix)).toFixed(3)}`,
-      )
     return whole <= maximum + 1e-8 && whole >= minimum - 1e-8 ? full : null
-  } catch (e) {
-    console.error(`PDBG tune-throw ${connection.name} ${String(e).slice(0, 120)}`)
+  } catch {
     return null
   }
 }
