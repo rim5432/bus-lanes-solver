@@ -23,6 +23,14 @@ export interface NativeCarrierSearchOptions {
   forcedVia?: Point
   /** One-via paired approaches stay inside their native package field. */
   carrierRegion?: Bounds
+  /** Via budget for the stage ladder. Default 2 = the stock single
+   * interlayer hop (stages 0..2). 4 adds one mid-route excursion pair
+   * (stages 0..4, top/carrier/top/carrier/top); odd budgets round up to
+   * the even ladder the two-surface pad parity forces. Measured basis
+   * (AM3352 ADDR hop campaign, 2026-11-09): the accepted 19-net scene
+   * seals A1/A12/A2/CSn0 above the 2-via family - their k-bucket BFS
+   * floor is 3-4 vias - while the campaign's accept gate allows 4. */
+  viaBudget?: number
 }
 
 /** Owns continuous occupancy for native TOP escapes and one inner carrier.
@@ -190,7 +198,15 @@ export class NativeCarrierRouter {
             this.carrier === "top"
             ? 0
             : 1
-          : 2
+          : 2,
+      // Stage-ladder top for this search. Each +2 stages buys one more
+      // interlayer excursion pair; the transition count (= via count) stays
+      // the ladder height, so the 2-via stock shape is budgets [2] first and
+      // the taller ladder only when the caller's viaBudget asks for it.
+      ladderTop =
+        goalStage === 2 && (options.viaBudget ?? 2) > 2
+          ? 2 * Math.round((options.viaBudget ?? 2) / 2)
+          : goalStage
     // Both endpoints already on the carrier (escape vias pre-placed by a
     // reservation, e.g. the AM3352 ADDR lane sweep between reserved dogbone
     // landings): the walk starts ON the carrier - seeding stage 0 would force
@@ -221,7 +237,7 @@ export class NativeCarrierRouter {
       return Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy)
     }
     const heuristic = (id: number) =>
-      remaining(id) / step + (goalStage - Math.floor(id / N)) * 100
+      remaining(id) / step + (ladderTop - Math.floor(id / N)) * 100
     const frontier = this.frontier
     frontier.clear()
     const starts = seededOnCarrier ? grids[1].starts : g.starts
@@ -238,6 +254,12 @@ export class NativeCarrierRouter {
     }
     let goal: LengthSearchLabel | undefined,
       expanded = 0
+    // PDBG instrument (2026-11-09): engine null vs raster-open contradiction
+    // (A3 geodesic 33.85mm/need 14.10 OPEN on the same scene the search
+    // noroutes on) - a null must say WHICH death: empty access (starts/ends
+    // from GridVisibilitySearch), budget exhaustion, or cap-pruned frontier
+    // emptiness.
+    const t_null = Date.now()
     try {
       while (
         frontier.length &&
@@ -250,11 +272,11 @@ export class NativeCarrierRouter {
         if (label.travelled + remaining(id) > cap + 1e-8) continue
         const stage = Math.floor(id / N),
           cell = id % N,
-          plane = stage === 1 ? 1 : 0
+          plane = stage % 2
         const grid = grids[plane],
           a = g.point(cell)
         if (
-          stage === goalStage &&
+          stage === ladderTop &&
           ends.has(cell) &&
           label.travelled + length(ends.get(cell)!) <= cap + 1e-8
         ) {
@@ -281,12 +303,21 @@ export class NativeCarrierRouter {
             b.y > bounds.maxY - wireMargin
           )
             continue
-          if (
-            goalStage !== 0 &&
-            stage !== 1 &&
-            !within(b, stage === 0 ? sourceBox : targetBox)
-          )
-            continue
+          if (goalStage !== 0 && stage !== 1) {
+            // Stage 0 escapes stay in the source package field and the
+            // final approach stays in the target field; the TALL ladder
+            // (ladderTop > 2) frees both mid-ladder planes AND the stage-0
+            // escape - measured basis (AM3352 hop campaign 2026-11-09,
+            // probe-hop-why on the 22-net scene): A1/A12 die NO-RAW in
+            // <500ms on every budget because their source pockets are
+            // saturated by 4-via incumbents, so no confined escape and no
+            // pocket via exists; the stock 2-via shape keeps the
+            // confinement untouched.
+            if (ladderTop <= 2 && stage === 0 && !within(b, sourceBox))
+              continue
+            if (stage !== 0 && stage === ladderTop && !within(b, targetBox))
+              continue
+          }
           if (
             goalStage === 1 &&
             !seededOnCarrier &&
@@ -317,8 +348,12 @@ export class NativeCarrierRouter {
             )
         }
         if (
-          stage < goalStage &&
-          (stage === 0 || within(a, targetBox)) &&
+          stage < ladderTop &&
+          // A transition into the final stage lands in the target package
+          // field (stock 1->2 approach via); every earlier transition is
+          // free anywhere a via pad is legal - stock keeps stage 0 escapes
+          // free, the taller ladder frees the mid-corridor hops too.
+          (stage + 1 !== ladderTop || within(a, targetBox)) &&
           (goalStage !== 1 || within(a, targetBox)) &&
           (!options.forcedVia ||
             Math.hypot(a.x - options.forcedVia.x, a.y - options.forcedVia.y) <
@@ -353,7 +388,12 @@ export class NativeCarrierRouter {
           )
         }
       }
-      if (!goal) return null
+      if (!goal) {
+        console.error(
+          `PDBG route-null ${c.name} starts=${starts.length} ends=${ends.size} expanded=${expanded} frontier=${frontier.length} cap=${Number.isFinite(cap) ? cap.toFixed(3) : "inf"} ms=${Date.now() - t_null} strict=${options.strict === true}`,
+        )
+        return null
+      }
       const ids: number[] = []
       for (let p: LengthSearchLabel | undefined = goal; p; p = p.parent)
         ids.push(p.node)
@@ -368,12 +408,12 @@ export class NativeCarrierRouter {
         const stage = Math.floor(ids[i] / N),
           previous = Math.floor(ids[i - 1] / N),
           p = g.point(ids[i] % N),
-          layer = stage === 1 ? this.carrier : "top"
+          layer = stage % 2 === 1 ? this.carrier : "top"
         if (stage !== previous)
           route.push({
             ...p,
             route_type: "via",
-            from_layer: previous === 1 ? this.carrier : "top",
+            from_layer: previous % 2 === 1 ? this.carrier : "top",
             to_layer: layer,
             layers: physical,
             via_diameter: diameter,

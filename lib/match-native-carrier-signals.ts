@@ -52,6 +52,11 @@ export interface NativeCarrierMatchingOptions {
    * coupling reports still validate them at acceptance, so a layout the
    * cohort router cannot keep coupled fails honestly. */
   routePairsAsLanes?: boolean
+  /** Via budget forwarded to the carrier router's stage ladder. Default 2
+   * (stock single interlayer hop); the AM3352 hop campaign's terminal
+   * carousel needs 4 (measured 2026-11-09: k-bucket BFS floors 3-4 vias,
+   * 2-via family empty on the sealed compositions). */
+  viaBudget?: number
 }
 export interface NativeCarrierProgress {
   groupName?: string
@@ -235,6 +240,7 @@ export function* matchNativeCarrierSignals(
       best: State | null = null,
       bestMetric = Infinity,
       stale = 0
+    const pairHeat = new Map<string, number>()
     for (let pass = 0; pass < passes; pass++) {
       for (const c of [...local.connections].sort(
         (a, b) => (trouble.get(b.name) ?? 0) - (trouble.get(a.name) ?? 0),
@@ -293,6 +299,7 @@ export function* matchNativeCarrierSignals(
           softPenalty: 5 + pass * 5,
           maxLength: options.deferSearchLengthBound ? undefined : maximum,
           maxExpansions: options.maxExpansionsPerRoute,
+          viaBudget: options.viaBudget,
         }
         if (!candidate && pass >= 1) {
           const strict = yield* router.route(c, {
@@ -377,6 +384,13 @@ export function* matchNativeCarrierSignals(
                   options.maxTuningCandidates,
                 )
               : cleanNativeCarrierSignal(local, c, raw.trace, others, true)
+            // PDBG instrument: raw found but untunable - the bank cannot fit
+            // in-window around the current neighbors (vs route-null = no path)
+            if (!candidate)
+              console.error(
+                `PDBG tune-fail ${c.name} raw=${length(raw.trace.route).toFixed(3)} min=${(minimums.get(c.name) ?? 0).toFixed(3)} max=${maximum.toFixed(3)}`,
+              )
+
             if (
               options.adaptiveRepair &&
               !candidate &&
@@ -433,6 +447,7 @@ export function* matchNativeCarrierSignals(
       const all = [...routed.values()],
         hits = graph(all)
       trouble = new Map()
+      const collidingPairs = new Set<string>()
       for (const [a, b, [first, second]] of hits) {
         for (const t of [all[a], all[b]])
           trouble.set(
@@ -440,7 +455,20 @@ export function* matchNativeCarrierSignals(
             (trouble.get(t.connection_name!) ?? 0) + 1,
           )
         const plane = first.layer === input.allowedLayers![0] ? 1 : 0
-        if (first.layer === "top" || plane === 1)
+        if (first.layer === "top" || plane === 1) {
+          // Augmented-Lagrangian recurrence charge (Ozdal thesis 2.3.3): a
+          // linear history cannot separate a homogeneous pair - measured 3x
+          // as the same clean-state collision carousel (5-net in the joint
+          // window runs, then the A3~A9 pair after staging). The k-th
+          // recurrence of the same net pair charges 10*k*k so persistent
+          // flippers pay super-linearly until one vacates; a pair that has
+          // separated cools to zero, matching the quadratic share term.
+          const key = [all[a].connection_name!, all[b].connection_name!]
+            .sort()
+            .join("~")
+          collidingPairs.add(key)
+          const k = (pairHeat.get(key) ?? 0) + 1
+          pairHeat.set(key, k)
           projector.penalizeIntersection(
             history[plane],
             first.a,
@@ -449,9 +477,12 @@ export function* matchNativeCarrierSignals(
             second.b,
             first.radius + second.radius + clearance,
             true,
-            10,
+            10 * k * k,
           )
+        }
       }
+      for (const key of pairHeat.keys())
+        if (!collidingPairs.has(key)) pairHeat.delete(key)
       const missing = unfinished(
         options.adaptiveRepair ? [...frozen, ...all] : all,
       )
@@ -657,5 +688,16 @@ export function* matchNativeCarrierSignals(
     }
   }
   console.error(`PDBG repair-exhausted collisions=${state.collisions} unfinished=${state.unfinished.join(",")} pairs=${graph(state.traces).map(([a, b]) => `${state.traces[a].connection_name}~${state.traces[b].connection_name}`).join("|")}`)
-  return null
+  // PDBG instrument: the exhaust path dies inside the generator and the
+  // near-miss state is otherwise unrecoverable - dump it when asked so the
+  // residual conflicts can be autopsied (gap deficits decide whether tuner
+  // micro-grammar can close the last collision).
+  if (process.env.PDBG_DUMP) {
+    require("node:fs").writeFileSync(
+      process.env.PDBG_DUMP,
+      JSON.stringify({ unfinished: state.unfinished, collisions: state.collisions, traces: state.traces }),
+    )
+    console.error(`PDBG exhaust-state dumped -> ${process.env.PDBG_DUMP}`)
+  }
+    return null
 }

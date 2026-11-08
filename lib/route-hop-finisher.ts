@@ -30,6 +30,14 @@ export interface HopFinisherOptions {
   /** Bounded retries per carrier. A candidate whose tuning fails becomes soft
    * copper and the search runs once more around it. Default 2. */
   attemptsPerCarrier?: number
+  /** Via ceiling for the generated shape. Default 2 (stock single interlayer
+   * hop); 4 additionally runs the taller stage ladder (one mid-route
+   * excursion pair). The stock pass always runs first, so callers that
+   * leave this at 2 see byte-identical behavior. Measured basis (AM3352
+   * hop campaign 2026-11-09): on the accepted 19-net scene the k-bucket
+   * BFS floor of A1/A12/A2/CSn0 is 3-4 vias - no 2-via candidate exists
+   * for the finisher to find, which is why sequential PF oscillated. */
+  maxVias?: number
 }
 
 /** Tune a same-surface (0-via) candidate to the window on its single layer.
@@ -120,6 +128,8 @@ export function* routeWindowedHopFinisher(
     window.maximum - fixedRouteLength(input, connection.name),
     0,
   )
+  const maxVias = options.maxVias ?? 2
+  const budgets = maxVias > 2 ? [2, maxVias] : [2]
   for (const carrier of carriers) {
     const native: SimpleRouteJson = { ...input, allowedLayers: [carrier] }
     const router = new NativeCarrierRouter(
@@ -129,56 +139,59 @@ export function* routeWindowedHopFinisher(
       bounds,
     )
     const soft: Trace[] = []
-    for (
-      let attempt = 0;
-      attempt < Math.max(1, options.attemptsPerCarrier ?? 2);
-      attempt++
-    ) {
-      const search = router.route(connection, {
-        maxLength: cap,
-        maxExpansions: options.maxExpansions ?? 1_500_000,
-        softTraces: soft,
-      })
-      let state = search.next()
-      try {
-        while (!state.done) {
-          yield undefined
-          state = search.next()
+    for (const viaBudget of budgets) {
+      for (
+        let attempt = 0;
+        attempt < Math.max(1, options.attemptsPerCarrier ?? 2);
+        attempt++
+      ) {
+        const search = router.route(connection, {
+          maxLength: cap,
+          maxExpansions: options.maxExpansions ?? 1_500_000,
+          softTraces: soft,
+          viaBudget,
+        })
+        let state = search.next()
+        try {
+          while (!state.done) {
+            yield undefined
+            state = search.next()
+          }
+        } finally {
+          if (!state.done) search.return(null)
         }
-      } finally {
-        if (!state.done) search.return(null)
-      }
-      const raw = state.value
-      if (!raw) break
-      const vias = raw.trace.route.filter(
-        (p) => p.route_type === "via",
-      ).length
-      const tuned =
-        vias === 2
-          ? tuneNativeCarrierSignal(
-              native,
-              connection,
-              raw.trace,
-              window.minimum,
-              window.maximum,
-              soft,
-              raw.bankCost,
-            )
-          : vias === 0
-            ? tuneSameSurfaceSignal(
+        const raw = state.value
+        if (!raw) break
+        const vias = raw.trace.route.filter(
+          (p) => p.route_type === "via",
+        ).length
+        const tuned =
+          vias >= 2 && vias <= maxVias
+            ? tuneNativeCarrierSignal(
                 native,
                 connection,
                 raw.trace,
-                window,
+                window.minimum,
+                window.maximum,
                 soft,
                 raw.bankCost,
               )
-            : null
-      if (tuned) {
-        yield tuned
-        return tuned
+            : vias === 0
+              ? tuneSameSurfaceSignal(
+                  native,
+                  connection,
+                  raw.trace,
+                  window,
+                  soft,
+                  raw.bankCost,
+                )
+              : null
+        if (tuned) {
+          yield tuned
+          return tuned
+        }
+        soft.push(raw.trace)
       }
-      soft.push(raw.trace)
     }
   }
   return null

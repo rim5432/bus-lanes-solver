@@ -17,6 +17,77 @@ export function cleanNativeCarrierSignal(
   const viaIndices = trace.route.flatMap((p, i) =>
     p.route_type === "via" ? [i] : [],
   )
+  if (viaIndices.length > 2) {
+    // 4-via ladder shapes (AM3352 hop campaign): clean every planar run on
+    // its own layer; carrierToo keeps its meaning (all runs vs surfaces
+    // only). One via alone is still a degenerate shape we refuse.
+    const width =
+      connection.width ?? connection.nominalTraceWidth ?? native.minTraceWidth
+    const runs: Trace["route"][] = []
+    let start = 0
+    for (const v of viaIndices) {
+      runs.push(trace.route.slice(start, v))
+      start = v + 1
+    }
+    runs.push(trace.route.slice(start))
+    const cleaned: Trace["route"][] = []
+    for (const run of runs) {
+      const layer = run[0]?.route_type === "wire" ? run[0].layer : "top"
+      const isCarrier = layer === native.allowedLayers![0]
+      if (run.length < 2 || (carrierToo === false && isCarrier)) {
+        cleaned.push(run)
+        continue
+      }
+      const c = {
+        ...connection,
+        pointsToConnect: [
+          { ...connection.pointsToConnect[0], ...run[0], layer },
+          { ...connection.pointsToConnect[1], ...run.at(-1)!, layer },
+        ],
+      }
+      const input = {
+        ...native,
+        connections: [c],
+        buses: [],
+        differentialPairs: [],
+      }
+      const hard = fixedCopper(input),
+        softCopper = fixedCopper({ ...input, obstacles: [], traces: soft })
+      try {
+        const path = reduceOrdinaryTurns(
+          run,
+          new VectorScene(input, c, width, [...hard, ...softCopper]),
+        )
+        cleaned.push(
+          chamferOrdinaryCorners(
+            input,
+            [
+              {
+                ...trace,
+                route: path.map((p) => ({
+                  ...p,
+                  route_type: "wire" as const,
+                  layer,
+                  width,
+                })),
+                curvedSegments: undefined,
+              },
+            ],
+            hard,
+            0.125,
+          )[0].route,
+        )
+      } catch {
+        return null
+      }
+    }
+    const route: Trace["route"] = []
+    for (let i = 0; i < cleaned.length; i++) {
+      route.push(...cleaned[i])
+      if (i < viaIndices.length) route.push(trace.route[viaIndices[i]])
+    }
+    return { ...trace, route, curvedSegments: undefined }
+  }
   if (viaIndices.length !== 2) {
     // A same-surface route has no via-separated carrier leg; clean its one
     // planar run directly instead of demanding the interlayer shape.
@@ -146,13 +217,56 @@ export function tuneNativeCarrierSignal(
   const trace = preserveExistingBanks
     ? raw
     : cleanNativeCarrierSignal(native, connection, raw, soft, false)
-  if (!trace) return null
-  const [a, b] = trace.route.flatMap((p, i) =>
+  if (!trace) {
+    // PDBG instrument (2026-11-09 review): clean failure was one of the
+    // silent tune-fail returns - distinguish it from via-shape refusal.
+    console.error(
+      `PDBG tune-clean-null ${connection.name} rawVias=${raw.route.filter((p) => p.route_type === "via").length} rawLen=${length(raw.route).toFixed(3)}`,
+    )
+    return null
+  }
+
+  const viaIdx = trace.route.flatMap((p, i) =>
     p.route_type === "via" ? [i] : [],
   )
+  if (viaIdx.length < 2) {
+    // PDBG instrument (2026-11-09 review): 0/1-via shapes are refused before
+    // any tuning; without this line they read as a generic tune-fail.
+    console.error(
+      `PDBG tune-via-short ${connection.name} vias=${viaIdx.length} len=${length(trace.route).toFixed(3)}`,
+    )
+    return null
+  }
+  let a = -1,
+    b = -1
+  if (viaIdx.length === 2) {
+    ;[a, b] = viaIdx
+  } else {
+    // 4-via ladder: tune the longest interior run; every other run stays
+    // fixed copper under the same connection name, so the bus target keeps
+    // its whole-signal meaning (tuned leg + same-name fixed traces).
+    let best = -1
+    for (let k = 1; k < viaIdx.length; k++) {
+      const span = viaIdx[k] - viaIdx[k - 1] - 1
+      if (span > best) {
+        best = span
+        a = viaIdx[k - 1]
+        b = viaIdx[k]
+      }
+    }
+  }
   const route = trace.route.slice(a + 1, b),
     prefix = trace.route.slice(0, a + 1),
     suffix = trace.route.slice(b)
+  // PDBG range-target probe (2026-11-09 review): env-gated, prints the
+  // whole-signal window and the fixed prefix+suffix length for every tune
+  // call. The tuner's target is the whole-signal minimum and the fixed
+  // escape copper is counted by fixedRouteLength, so this line is the
+  // authoritative test of the "leg window is offset by p+s" hypothesis.
+  if (process.env.PDBG_TUNE_WINDOW)
+    console.error(
+      `PDBG tune-probe ${connection.name} win=[${minimum.toFixed(3)},${maximum.toFixed(3)}] fixedPrefixSuffix=${(length(prefix) + length(suffix)).toFixed(3)} rawWhole=${length(trace.route).toFixed(3)} leg=${length(route).toFixed(3)}`,
+    )
   const escapes: Trace[] = [
     {
       ...trace,
@@ -173,12 +287,16 @@ export function tuneNativeCarrierSignal(
     },
   ]
   const carrier = native.allowedLayers![0]
+  // The tuned leg may be a mid-ladder top excursion on 4-via shapes; its
+  // layer comes from the route itself (the carrier leg on stock shapes).
+  const subjectLayer =
+    route[0]?.route_type === "wire" ? route[0].layer : carrier
   const c = {
     ...connection,
     pointsToConnect: connection.pointsToConnect.map((p, i) => ({
       ...p,
       ...route[i ? route.length - 1 : 0],
-      layer: carrier,
+      layer: subjectLayer,
     })),
   }
   const input: SimpleRouteJson = {
@@ -225,7 +343,7 @@ export function tuneNativeCarrierSignal(
           route: path.map((p) => ({
             ...p,
             route_type: "wire" as const,
-            layer: carrier,
+            layer: subjectLayer,
             width,
           })),
         },
@@ -249,11 +367,14 @@ export function tuneNativeCarrierSignal(
       route: [...prefix, ...matched.route, ...suffix],
       curvedSegments: matched.curvedSegments?.map((i) => i + prefix.length),
     }
-    return length(full.route) <= maximum + 1e-8 &&
-      length(full.route) >= minimum - 1e-8
-      ? full
-      : null
-  } catch {
+    const whole = length(full.route)
+    if (whole > maximum + 1e-8 || whole < minimum - 1e-8)
+      console.error(
+        `PDBG tune-null ${connection.name} whole=${whole.toFixed(3)} win=[${minimum.toFixed(3)},${maximum.toFixed(3)}] fixedPrefixSuffix=${(length(prefix) + length(suffix)).toFixed(3)}`,
+      )
+    return whole <= maximum + 1e-8 && whole >= minimum - 1e-8 ? full : null
+  } catch (e) {
+    console.error(`PDBG tune-throw ${connection.name} ${String(e).slice(0, 120)}`)
     return null
   }
 }

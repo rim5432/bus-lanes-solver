@@ -456,21 +456,24 @@ export function* routePinnedNativeBuses(
             ),
           ),
         )
-        console.error(
+                console.error(
           `PDBG seed-lengths ${group.bus.busId} target=${busTargetLengths[group.bus.busId]} max=${group.bus.maxLength ?? "-"} ${seed
-            .filter((trace) =>
+            .filter((trace: (typeof seed)[number]) =>
               group.bus.connectionNames.includes(trace.connection_name!),
             )
-            .map((trace) => `${trace.connection_name}:${Math.round(length(trace.route) * 1e6)}`)
+            .map((trace: (typeof seed)[number]) => `${trace.connection_name}:${Math.round(length(trace.route) * 1e6)}`)
             .sort()
             .join(" ")}`,
         )
-        try {
-          writeFileSync(
-            `${process.env.TEMP ?? "/tmp"}/pinned-seed-${group.bus.busId}.json`,
-            JSON.stringify(seed),
-          )
-        } catch {}
+        // side effect guarded to opt-in (was unconditional - a debug dump to
+        // TEMP on every solve; not route semantics)
+        if (process.env.PDBG_DUMP_SEEDS)
+          try {
+            writeFileSync(
+              `${process.env.TEMP ?? "/tmp"}/pinned-seed-${group.bus.busId}.json`,
+              JSON.stringify(seed),
+            )
+          } catch {}
       }
     } else if (unanchored.length) {
       const cells =
@@ -488,6 +491,7 @@ export function* routePinnedNativeBuses(
         for (const c of group.connections) {
           const raw = yield* router.route(c, {
             maxExpansions: config.maxExpansionsPerRoute,
+            viaBudget: config.viaBudget,
           })
           if (!raw) return null
           const clean = cleanNativeCarrierSignal(
