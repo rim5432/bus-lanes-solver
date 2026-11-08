@@ -175,7 +175,7 @@ export function* matchNativeCarrierSignals(
         ...(options.fixedConnections ?? []),
       ],
     }
-    return validateRoutedCopperDrc({
+    const drcResult = validateRoutedCopperDrc({
       inputSrj: validationInput,
       routedSrj: {
         ...validationInput,
@@ -183,7 +183,12 @@ export function* matchNativeCarrierSignals(
       },
       clearance,
       allowBlindAndBuriedVias: false,
-    } as unknown as Parameters<typeof validateRoutedCopperDrc>[0]).valid
+    } as unknown as Parameters<typeof validateRoutedCopperDrc>[0])
+    if (!drcResult.valid)
+      console.error(
+        `PDBG drc-reject ${JSON.stringify((drcResult as { issues?: unknown[] }).issues?.slice(0, 6)).slice(0, 900)}`,
+      )
+    return drcResult.valid
   }
   if (!input.connections.length) return valid([]) ? paired : null
   function* negotiate(
@@ -328,6 +333,7 @@ export function* matchNativeCarrierSignals(
         }
         if (!candidate) {
           let raw = yield* router.route(c, search)
+          if (!raw) console.error(`PDBG noroute ${c.name} carrier=${input.allowedLayers![0]} pass=${pass}`)
           // A congestion-cheap detour is not evidence that the whole bus must
           // become longer. Preserve its timing window when a more expensive,
           // length-bounded alternative is available.
@@ -418,7 +424,10 @@ export function* matchNativeCarrierSignals(
         }
         if (candidate) routed.set(c.name, candidate)
         else if (old) routed.set(c.name, old)
-        else return null
+        else {
+          console.error(`PDBG kill ${c.name} carrier=${input.allowedLayers![0]} pass=${pass}`)
+          return null
+        }
         yield
       }
       const all = [...routed.values()],
@@ -580,10 +589,15 @@ export function* matchNativeCarrierSignals(
       "native_global_matching",
     )
   }
-  if (!firstState) return null
+  if (!firstState) {
+    console.error("PDBG firstState-null")
+    return null
+  }
   let state: State = firstState
-  if (!state.collisions && !state.unfinished.length && valid(state.traces))
+  if (!state.collisions && !state.unfinished.length && valid(state.traces)) {
+    console.error(`PDBG match-return-clean ${state.traces.length}`)
     return [...paired, ...state.traces]
+  }
   for (let repair = 0; repair < (options.maxRepairRounds ?? 6); repair++) {
     const closure = new Set<string>(),
       hits = graph(state.traces)
@@ -637,8 +651,11 @@ export function* matchNativeCarrierSignals(
         state.collisions + 20 * state.unfinished.length
     )
       state = next
-    if (!state.collisions && !state.unfinished.length && valid(state.traces))
+    if (!state.collisions && !state.unfinished.length && valid(state.traces)) {
+      console.error(`PDBG match-return-repaired ${state.traces.length} repair=${repair}`)
       return [...paired, ...state.traces]
+    }
   }
+  console.error(`PDBG repair-exhausted collisions=${state.collisions} unfinished=${state.unfinished.join(",")} pairs=${graph(state.traces).map(([a, b]) => `${state.traces[a].connection_name}~${state.traces[b].connection_name}`).join("|")}`)
   return null
 }
