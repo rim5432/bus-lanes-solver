@@ -254,12 +254,6 @@ export class NativeCarrierRouter {
     }
     let goal: LengthSearchLabel | undefined,
       expanded = 0
-    // PDBG instrument (2026-11-09): engine null vs raster-open contradiction
-    // (A3 geodesic 33.85mm/need 14.10 OPEN on the same scene the search
-    // noroutes on) - a null must say WHICH death: empty access (starts/ends
-    // from GridVisibilitySearch), budget exhaustion, or cap-pruned frontier
-    // emptiness.
-    const t_null = Date.now()
     try {
       while (
         frontier.length &&
@@ -388,12 +382,7 @@ export class NativeCarrierRouter {
           )
         }
       }
-      if (!goal) {
-        console.error(
-          `PDBG route-null ${c.name} starts=${starts.length} ends=${ends.size} expanded=${expanded} frontier=${frontier.length} cap=${Number.isFinite(cap) ? cap.toFixed(3) : "inf"} ms=${Date.now() - t_null} strict=${options.strict === true}`,
-        )
-        return null
-      }
+      if (!goal) return null
       const ids: number[] = []
       for (let p: LengthSearchLabel | undefined = goal; p; p = p.parent)
         ids.push(p.node)

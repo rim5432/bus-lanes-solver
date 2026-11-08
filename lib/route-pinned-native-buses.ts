@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs"
 import {
   getCopperLayerNames,
   validateOriginalEndpointConnectivity,
@@ -435,10 +434,7 @@ export function* routePinnedNativeBuses(
         config,
         (state) => report({ ...state, stage: `pinned_clear_${state.stage}` }),
       )
-      if (!clear) {
-        console.error("PDBG clear-null")
-        return null
-      }
+      if (!clear) return null
       const pairedNames = new Set(paired.map((trace) => trace.connection_name))
       seed.push(
         ...clear.filter((trace) => !pairedNames.has(trace.connection_name)),
@@ -456,24 +452,6 @@ export function* routePinnedNativeBuses(
             ),
           ),
         )
-                console.error(
-          `PDBG seed-lengths ${group.bus.busId} target=${busTargetLengths[group.bus.busId]} max=${group.bus.maxLength ?? "-"} ${seed
-            .filter((trace: (typeof seed)[number]) =>
-              group.bus.connectionNames.includes(trace.connection_name!),
-            )
-            .map((trace: (typeof seed)[number]) => `${trace.connection_name}:${Math.round(length(trace.route) * 1e6)}`)
-            .sort()
-            .join(" ")}`,
-        )
-        // side effect guarded to opt-in (was unconditional - a debug dump to
-        // TEMP on every solve; not route semantics)
-        if (process.env.PDBG_DUMP_SEEDS)
-          try {
-            writeFileSync(
-              `${process.env.TEMP ?? "/tmp"}/pinned-seed-${group.bus.busId}.json`,
-              JSON.stringify(seed),
-            )
-          } catch {}
       }
     } else if (unanchored.length) {
       const cells =

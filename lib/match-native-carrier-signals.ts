@@ -189,10 +189,6 @@ export function* matchNativeCarrierSignals(
       clearance,
       allowBlindAndBuriedVias: false,
     } as unknown as Parameters<typeof validateRoutedCopperDrc>[0])
-    if (!drcResult.valid)
-      console.error(
-        `PDBG drc-reject ${JSON.stringify((drcResult as { issues?: unknown[] }).issues?.slice(0, 6)).slice(0, 900)}`,
-      )
     return drcResult.valid
   }
   if (!input.connections.length) return valid([]) ? paired : null
@@ -340,7 +336,6 @@ export function* matchNativeCarrierSignals(
         }
         if (!candidate) {
           let raw = yield* router.route(c, search)
-          if (!raw) console.error(`PDBG noroute ${c.name} carrier=${input.allowedLayers![0]} pass=${pass}`)
           // A congestion-cheap detour is not evidence that the whole bus must
           // become longer. Preserve its timing window when a more expensive,
           // length-bounded alternative is available.
@@ -384,13 +379,6 @@ export function* matchNativeCarrierSignals(
                   options.maxTuningCandidates,
                 )
               : cleanNativeCarrierSignal(local, c, raw.trace, others, true)
-            // PDBG instrument: raw found but untunable - the bank cannot fit
-            // in-window around the current neighbors (vs route-null = no path)
-            if (!candidate)
-              console.error(
-                `PDBG tune-fail ${c.name} raw=${length(raw.trace.route).toFixed(3)} min=${(minimums.get(c.name) ?? 0).toFixed(3)} max=${maximum.toFixed(3)}`,
-              )
-
             if (
               options.adaptiveRepair &&
               !candidate &&
@@ -438,10 +426,7 @@ export function* matchNativeCarrierSignals(
         }
         if (candidate) routed.set(c.name, candidate)
         else if (old) routed.set(c.name, old)
-        else {
-          console.error(`PDBG kill ${c.name} carrier=${input.allowedLayers![0]} pass=${pass}`)
-          return null
-        }
+        else return null
         yield
       }
       const all = [...routed.values()],
@@ -620,13 +605,9 @@ export function* matchNativeCarrierSignals(
       "native_global_matching",
     )
   }
-  if (!firstState) {
-    console.error("PDBG firstState-null")
-    return null
-  }
+  if (!firstState) return null
   let state: State = firstState
   if (!state.collisions && !state.unfinished.length && valid(state.traces)) {
-    console.error(`PDBG match-return-clean ${state.traces.length}`)
     return [...paired, ...state.traces]
   }
   for (let repair = 0; repair < (options.maxRepairRounds ?? 6); repair++) {
@@ -683,21 +664,8 @@ export function* matchNativeCarrierSignals(
     )
       state = next
     if (!state.collisions && !state.unfinished.length && valid(state.traces)) {
-      console.error(`PDBG match-return-repaired ${state.traces.length} repair=${repair}`)
       return [...paired, ...state.traces]
     }
   }
-  console.error(`PDBG repair-exhausted collisions=${state.collisions} unfinished=${state.unfinished.join(",")} pairs=${graph(state.traces).map(([a, b]) => `${state.traces[a].connection_name}~${state.traces[b].connection_name}`).join("|")}`)
-  // PDBG instrument: the exhaust path dies inside the generator and the
-  // near-miss state is otherwise unrecoverable - dump it when asked so the
-  // residual conflicts can be autopsied (gap deficits decide whether tuner
-  // micro-grammar can close the last collision).
-  if (process.env.PDBG_DUMP) {
-    require("node:fs").writeFileSync(
-      process.env.PDBG_DUMP,
-      JSON.stringify({ unfinished: state.unfinished, collisions: state.collisions, traces: state.traces }),
-    )
-    console.error(`PDBG exhaust-state dumped -> ${process.env.PDBG_DUMP}`)
-  }
-    return null
+  return null
 }
