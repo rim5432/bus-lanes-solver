@@ -67,7 +67,11 @@ function* negotiateGeneratedSignalSites(
         allowExpandedSites: true,
         expandEmptyDomainsOnly,
         allowPadEdgeSites,
-        maxCandidateSearchNodes: 12000,
+        maxCandidateSearchNodes: Number(process.env.BLS_SITES_NODES ?? 12000),
+        onBlockedConnection:
+          process.env.BLS_DEBUG === "1"
+            ? (name: string) => console.error("[sites] blocked", name)
+            : undefined,
       },
     )
     if (routed) return routed

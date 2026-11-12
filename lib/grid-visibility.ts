@@ -1,4 +1,4 @@
-import {
+﻿import {
   LengthSearchFrontier,
   type LengthSearchLabel,
 } from "./length-search-frontier"
@@ -846,7 +846,13 @@ export class GridVisibilitySearch extends GridHistoryProjector {
       const x = Math.round((p.x - b.minX) / this.stepSize),
         y = Math.round((p.y - b.minY) / this.stepSize)
       const candidates: Array<{ id: number; path: Point[] }> = []
-      for (let dy = -4; dy <= 4; dy++)
+      // C4 campaign (the AM3352 D11/D12-class corridor pads): a pad sealed
+      // by supplied copper keeps every raster-near free cell inside its own
+      // footprint while the connected field starts 0.3-1 mm out. Scan a
+      // wider window so the attachment set reaches the connected
+      // component; nearest-first sorting keeps ordinary terminals in
+      // their prior order and the extra seeds only widen the search.
+      for (let dy = -12; dy <= 12; dy++)
         for (let dx = -4; dx <= 4; dx++) {
           if (
             x + dx < 0 ||
@@ -869,7 +875,7 @@ export class GridVisibilitySearch extends GridHistoryProjector {
       // their existing route; these alternatives are only used after failure.
       const result = candidates
         .sort((a, b) => length(a.path) - length(b.path) || a.id - b.id)
-        .slice(0, 8)
+        .slice(0, 16)
       if (attachments.size >= 128)
         attachments.delete(attachments.keys().next().value!)
       attachments.set(key, structuredClone(result))

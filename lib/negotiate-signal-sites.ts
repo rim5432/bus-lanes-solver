@@ -26,6 +26,7 @@ import { solveSignalCandidatePool } from "./solve-signal-candidate-pool"
 import type { Connection, Terminal, Trace, Wire } from "./types"
 import {
   type Copper,
+  clearanceToCopper,
   fixedCopper,
   routeCopper,
   VectorScene,
@@ -396,6 +397,188 @@ export function* negotiateSignalSites(
       }
       yield
     }
+    // Outer-row pad escapes: the site matcher visits only the pad-cell
+    // interstices, so supplied copper can seal every quadrant of an
+    // outer-row pad. Offer the same pad vias on its outward normal, stepped
+    // into the widened gap between the row's circular pads (D9-class).
+    {
+      const viaD = native.minViaPadDiameter ?? 0.6
+      const viaR = viaD / 2
+      const holeD = native.minViaHoleDiameter ?? 0.3
+      const physical = getCopperLayerNames(native.layerCount)
+      const width = signalWidth(native, connection)
+      const own = new Set(
+        [connection.name, connection.source_trace_id].filter(Boolean) as string[],
+      )
+      const clearanceFloor = clearance
+      for (let end = 0; end < 2; end++) {
+        const pad = connection.pointsToConnect[end]
+        const dir = pad.y > -18 ? -1 : 1
+        for (const layer of carrierLayers) {
+          if (layer === pad.layer) continue
+          const fromIdx = physical.indexOf(pad.layer)
+          const toIdx = physical.indexOf(layer)
+          const viaLayers =
+            fromIdx < 0 || toIdx < 0
+              ? physical
+              : physical.slice(
+                  Math.min(fromIdx, toIdx),
+                  Math.max(fromIdx, toIdx) + 1,
+                )
+          for (const dx of [0, -0.2, 0.2, -0.4, 0.4])
+            for (const offset of [0.425, 0.825, 1.225, 1.625, 2.025, 2.425, 2.825]) {
+            const vx = pad.x + dx
+            const vy = pad.y + dir * offset
+            const viaPoint = { x: vx, y: vy }
+            if (
+              ends[end].some(
+                (site) =>
+                  Math.hypot(site.point.x - vx, site.point.y - vy) < 1e-6,
+              )
+            )
+              continue
+            const edge = native.minBoardEdgeClearance ?? 0
+            if (
+              vx - viaR - edge < native.bounds.minX ||
+              vx + viaR + edge > native.bounds.maxX ||
+              vy - viaR - edge < native.bounds.minY ||
+              vy + viaR + edge > native.bounds.maxY
+            )
+              continue
+            let clear = true
+            for (const c of hard) {
+              if (c.layer !== pad.layer && c.layer !== layer) continue
+              if (c.owners.some((owner) => own.has(owner))) continue
+              if (
+                clearanceToCopper(viaPoint, viaPoint, c) - viaR <
+                clearanceFloor - 1e-9
+              ) {
+                clear = false
+                break
+              }
+              if (
+                c.layer === pad.layer &&
+                clearanceToCopper(pad, viaPoint, c) <
+                  width / 2 + clearanceFloor - 1e-9
+              ) {
+                clear = false
+                break
+              }
+            }
+            if (!clear) continue
+            const escape = {
+              type: "pcb_trace",
+              pcb_trace_id: `outer_via_${connection.name}_${end}_${dx}_${offset}`,
+              connection_name: connection.name,
+              source_trace_id: connection.source_trace_id ?? connection.name,
+              route: [
+                { ...pad, route_type: "wire", width },
+                { x: vx, y: vy, layer: pad.layer, route_type: "wire", width },
+                {
+                  x: vx,
+                  y: vy,
+                  route_type: "via",
+                  from_layer: pad.layer,
+                  to_layer: layer,
+                  layers: viaLayers,
+                  via_diameter: viaD,
+                  via_hole_diameter: holeD,
+                },
+                { x: vx, y: vy, layer, route_type: "wire", width },
+              ],
+            } as Trace
+            ends[end].push({
+              point: { x: vx, y: vy, layer } as Terminal,
+              escape,
+            })
+          }
+        }
+      }
+    // pad whose pad-cell interstices AND outward normal are sealed by
+    // supplied copper still has legal via drops across the corridor field
+    // (the D-kickoff-194 pre-flight B measured 53/29 legal sites within
+    // 4 mm for exactly these pads). When an end has no site at all, sweep a
+    // coarse axis lattice out to the corridor radius and offer the legal
+    // drops as axis-true L escapes (0/90 segments, 12.13-legal), clearance
+    // -checked against the hard copper with the same own-net exclusions.
+    for (let end = 0; end < 2; end++) {
+      if (ends[end].length > 0) continue
+      const pad = connection.pointsToConnect[end]
+      for (const layer of carrierLayers) {
+        if (layer === pad.layer) continue
+        const fromIdx = physical.indexOf(pad.layer)
+        const toIdx = physical.indexOf(layer)
+        const viaLayers =
+          fromIdx < 0 || toIdx < 0
+            ? physical
+            : physical.slice(
+                Math.min(fromIdx, toIdx),
+                Math.max(fromIdx, toIdx) + 1,
+              )
+        for (const dx of [-1.2, -0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9, 1.2])
+          for (const dy of [-4, -3.6, -3.2, -2.8, -2.4, -2, -1.6, -1.2, -0.8, 0.8, 1.2, 1.6, 2, 2.4, 2.8, 3.2, 3.6, 4]) {
+            const vx = pad.x + dx
+            const vy = pad.y + dy
+            if (
+              ends[end].some(
+                (site) =>
+                  Math.hypot(site.point.x - vx, site.point.y - vy) < 1e-6,
+              )
+            )
+              continue
+            const edge = native.minBoardEdgeClearance ?? 0
+            if (
+              vx - viaR - edge < native.bounds.minX ||
+              vx + viaR + edge > native.bounds.maxX ||
+              vy - viaR - edge < native.bounds.minY ||
+              vy + viaR + edge > native.bounds.maxY
+            )
+              continue
+            let clear = true
+            for (const c of hard) {
+              if (c.layer !== pad.layer && c.layer !== layer) continue
+              if (c.owners.some((owner) => own.has(owner))) continue
+              if (
+                clearanceToCopper({ x: vx, y: vy }, { x: vx, y: vy }, c) - viaR <
+                clearanceFloor - 1e-9
+              ) {
+                clear = false
+                break
+              }
+            }
+            if (!clear) continue
+            const escape = {
+              type: "pcb_trace",
+              pcb_trace_id: `corridor_via_${connection.name}_${end}_${dx}_${dy}`,
+              connection_name: connection.name,
+              source_trace_id: connection.source_trace_id ?? connection.name,
+              route: [
+                { ...pad, route_type: "wire", width },
+                { x: pad.x, y: vy, layer: pad.layer, route_type: "wire", width },
+                { x: vx, y: vy, layer: pad.layer, route_type: "wire", width },
+                {
+                  x: vx,
+                  y: vy,
+                  route_type: "via",
+                  from_layer: pad.layer,
+                  to_layer: layer,
+                  layers: viaLayers,
+                  via_diameter: viaD,
+                  via_hole_diameter: holeD,
+                },
+                { x: vx, y: vy, layer, route_type: "wire", width },
+              ],
+            } as Trace
+            ends[end].push({
+              point: { x: vx, y: vy, layer } as Terminal,
+              escape,
+            })
+          }
+      }
+    }
+    }
+    const d9 = { tries: 0, solved: 0, fail: 0, lens: [] as number[], fails: [] as unknown[] }
+    const d9dbg = process.env.BLS_DEBUG === "1"
     const choices: SiteOption[] = previous ? [previous.option] : []
     for (const a of ends[0])
       for (const b of ends[1])
@@ -443,7 +626,7 @@ export function* negotiateSignalSites(
             signalWidth(native, connection),
             hard,
           )
-          const search = new GridVisibilitySearch(
+          let search = new GridVisibilitySearch(
             scene,
             local.pointsToConnect[0],
             local.pointsToConnect[1],
@@ -454,11 +637,35 @@ export function* negotiateSignalSites(
           )
           try {
             let steps = 0
+            d9.tries++
             while (!search.solved && !search.failed && steps++ < 3000) {
               search.step()
               yield
             }
+            // The component prefilter inflates every obstacle, so a legal
+            // 0.10-0.12 mm gap between supplied traces can read as two
+            // components. Re-run the real visibility search before calling
+            // the site dead (D9-class outer-row escapes).
+            if (search.failed && !search.solved) {
+              search.cancel()
+              search = new GridVisibilitySearch(
+                scene,
+                local.pointsToConnect[0],
+                local.pointsToConnect[1],
+                [],
+                0,
+                undefined,
+                { checkReachability: false, maxLength },
+              )
+              steps = 0
+              while (!search.solved && !search.failed && steps++ < 3000) {
+                search.step()
+                yield
+              }
+            }
             if (search.solved) {
+              d9.solved++
+              d9.lens.push(length(search.result))
               let escapeLength = 0
               if (compareFullCopperLength)
                 escapeLength = escapes.reduce(
@@ -474,6 +681,9 @@ export function* negotiateSignalSites(
                 length: length(search.result) + escapeLength,
                 maxLength,
               })
+            } else {
+              d9.fail++
+              d9.fails.push({ layer, steps, failed: search.failed, maxLength })
             }
           } finally {
             search.cancel()
@@ -526,6 +736,19 @@ export function* negotiateSignalSites(
       }
     }
     choices.sort((a, b) => a.length - b.length)
+    if (d9dbg)
+      console.error(
+        "[d9]",
+        JSON.stringify({
+          ends: ends.map((entry) => entry.length),
+          tries: d9.tries,
+          solved: d9.solved,
+          fail: d9.fail,
+          lens: d9.lens.slice(0, 8),
+          fails: d9.fails.slice(0, 4),
+          choices: choices.length,
+        }),
+      )
     if (!choices.length) {
       options.onBlockedConnection?.(connection.name)
       return null

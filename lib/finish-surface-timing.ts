@@ -26,6 +26,10 @@ export function* finishSurfaceTiming(
   policy: { preserveTiming?: boolean; maxSteps?: number } = {},
 ): Generator<void, FlexibleSignalState | null> {
   const { native } = previous
+  const DBG = process.env.BLS_DEBUG === "1"
+  const dbg = (...a: unknown[]) => {
+    if (DBG) console.error("[timing]", ...a)
+  }
   const paired = new Set(
     native.differentialPairs?.flatMap((pair) => pair.connectionNames),
   )
@@ -182,13 +186,19 @@ export function* finishSurfaceTiming(
         options,
         maxSteps,
       )
-      if (!matched) return null
+      if (!matched) {
+        dbg("null: solveRefinement (initial match)")
+        return null
+      }
       prepared.traces = matched
       const extended = yield* runBoundedRouting(
         extendPackageCoupling(prepared.input, prepared.traces),
         maxSteps,
       )
-      if (!extended) return null
+      if (!extended) {
+        dbg("null: extendPackageCoupling")
+        return null
+      }
       prepared.traces = extended
       if (
         exteriorPairSpacingReports(prepared.input, prepared.traces).some(
@@ -203,7 +213,10 @@ export function* finishSurfaceTiming(
           ),
           maxSteps,
         )
-        if (!repaired) return null
+        if (!repaired) {
+          dbg("null: shortenPairApproaches+extend")
+          return null
+        }
         prepared.traces = repaired
       }
       if (!accepted()) {
@@ -236,12 +249,25 @@ export function* finishSurfaceTiming(
             options,
             maxSteps,
           )
-          if (!rematched) return null
+          if (!rematched) {
+            dbg("null: solveRefinement (rematch)")
+            return null
+          }
           prepared.traces = rematched
         }
       }
     }
-    if (!accepted()) return null
+    if (!accepted()) {
+      dbg("accepted false", JSON.stringify({
+        buses: busLengthReports(prepared.input, prepared.traces),
+        pairs: pairLengthReports(prepared.input, prepared.traces),
+        exterior: exteriorPairSpacingReports(
+          { ...prepared.input, differentialPairs: coupledPairs },
+          prepared.traces,
+        ),
+      }))
+      return null
+    }
     const validator = BusLanesSolver.forValidation(
       prepared.input,
       prepared.traces,
@@ -253,7 +279,10 @@ export function* finishSurfaceTiming(
         validator.step()
         yield
       }
-      if (!validator.solved) return null
+      if (!validator.solved) {
+        dbg("null: validator not solved")
+        return null
+      }
     } finally {
       if (!validator.solved && !validator.failed) validator.tryFinalAcceptance()
     }
@@ -268,7 +297,8 @@ export function* finishSurfaceTiming(
         (trace) => !paired.has(trace.connection_name!),
       ),
     }
-  } catch {
+  } catch (error) {
+    dbg("catch", String(error))
     return null
   }
 }

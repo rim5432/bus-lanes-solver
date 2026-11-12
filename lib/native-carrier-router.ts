@@ -1,4 +1,4 @@
-import { getCopperLayerNames } from "@tscircuit/fanout-solver"
+﻿import { getCopperLayerNames } from "@tscircuit/fanout-solver"
 import { CopperConflictIndex } from "./copper-conflict-index"
 import { length, simplify } from "./geometry"
 import { GridVisibilitySearch, type GridRoutingAccess } from "./grid-visibility"

@@ -1,4 +1,4 @@
-import { validateRoutedCopperDrc } from "@tscircuit/fanout-solver"
+﻿import { validateRoutedCopperDrc } from "@tscircuit/fanout-solver"
 import { CopperConflictIndex } from "./copper-conflict-index"
 import { nativeLengthWindows } from "./native-length-windows"
 import { length, segmentDistance } from "./geometry"
@@ -57,6 +57,12 @@ export interface NativeCarrierMatchingOptions {
    * carousel needs 4 (measured 2026-11-09: k-bucket BFS floors 3-4 vias,
    * 2-via family empty on the sealed compositions). */
   viaBudget?: number
+  /** Carrier-walk confinement override (the C4 mixed-terminal campaign):
+   * a connection whose second terminal sits on the carrier at a reserved
+   * landing confines its stage-1 walk to the target package region by
+   * default; a reserved landing inside the source package field with a
+   * long inter-package carrier walk needs the routing bounds instead. */
+  carrierRegion?: SimpleRouteJson["bounds"]
 }
 export interface NativeCarrierProgress {
   groupName?: string
@@ -296,6 +302,7 @@ export function* matchNativeCarrierSignals(
           maxLength: options.deferSearchLengthBound ? undefined : maximum,
           maxExpansions: options.maxExpansionsPerRoute,
           viaBudget: options.viaBudget,
+          carrierRegion: options.carrierRegion,
         }
         if (!candidate && pass >= 1) {
           const strict = yield* router.route(c, {
@@ -426,7 +433,9 @@ export function* matchNativeCarrierSignals(
         }
         if (candidate) routed.set(c.name, candidate)
         else if (old) routed.set(c.name, old)
-        else return null
+        else {
+          return null
+        }
         yield
       }
       const all = [...routed.values()],
